@@ -1,7 +1,5 @@
-'use strict';
-
-const amqp = require('amqplib');
-const uuid = require('uuid');
+import amqp from 'amqplib';
+import uuid  from 'uuid';
 
 const DELIVERY_MODE_PERSISTENT = 2;
 const EVENT_EXCHANGE = 'amq.topic';
@@ -16,6 +14,18 @@ function MicroMessageHub({
   }) {
 
   let _publishChannel;
+
+  this.parsers = {
+    'application/json': (msg) => JSON.parse(msg.content.toString()),
+    'text/plain': (msg) => msg.content.toString(),
+    'default': (msg) => msg.content
+  };
+
+  this.serializers = {
+    'application/json': (body) => new Buffer(JSON.stringify(body)),
+    'text/plain': (body) => new Buffer(body),
+    'default': (body) => body
+  };
 
   this.connect = () => {
     return (_conn ? Promise.resolve(_conn) : amqp.connect(_url, _socketOptions))
@@ -42,7 +52,8 @@ function MicroMessageHub({
             channel,
             queueName,
             exchangeName: _eventExchangeName,
-            autoAck: false
+            autoAck: false,
+            msgHandler: _eventMsgHandler
           }))
       });
   };
@@ -62,7 +73,8 @@ function MicroMessageHub({
             channel,
             queueName,
             exchangeName: _queryExchangeName,
-            autoAck: true
+            autoAck: true,
+            _msgHandler: _queryMsgHandler
           }));
       });
   };
@@ -85,37 +97,49 @@ function MicroMessageHub({
       _publishChannel.publish(_eventExchangeName, routingKey, buffer, options, cb)
     });
   };
+
+  const _eventMsgHandler = (channel, queueName, bindings) => (msg) => {
+    const routingKey = msg.fields.routingKey;
+    const accepted = bindings.filter(b => b.test(routingKey));
+    if (accepted.length < 1) {
+      console.log(`MMH: No listener for <${routingKey}> on queue [${queueName}]`);
+      return;
+    }
+    const parser = this.parsers[msg.fields.contentType] || this.parsers['default'];
+    const event = parser(msg);
+    const trace = msg.properties.headers.trace || [];
+
+    return Promise.all(accepted.map(b => b.callback(event, trace, msg)))
+      .then(() => channel.ack(msg), () => channel.nack(msg));
+  };
+
+  const _queryMsgHandler = (channel, queueName, bindings) => (msg) => {
+    //TODO...
+  };
 }
 
-function MicroMessageQueue({_channel, _queueName, _exchangeName, _noAck}) {
+function MicroMessageQueue({_channel, _queueName, _exchangeName, _noAck, _msgHandler}) {
 
-  const bindings = [];
+  const _bindings = [];
 
   this.bind = (routingKey, callback) => {
     console.log(`MMH: binding queue [${_queueName}] to <${routingKey}>`);
 
     const regex = routingKey.replace('.', '[.]').replace('[.]#', '([.].*)?');
     const routingKeyPattern = new RegExp(regex);
-    bindings.push({
+
+    _bindings.push({
       callback,
       test: (currentRoutingKey) => routingKeyPattern.test(currentRoutingKey)
     });
-    return this;
+
+    return _channel.bind(_queueName, _exchangeName, routingKey)
+      .then(() => this);
   };
 
   this.done = () => {
-    return _channel.consume(options.queueName, _messageHandler, {
-      noAck: options.autoAck
-    });
-  };
-
-  this.onMessage = (message, trace, info) => {
-    const accepted = bindings.filter(b => b.test(info.routingKey));
-    if (accepted.length < 1) {
-      console.log(`MMH: No listener for <${info.routingKey}>  on queue [${_queueName}]`)
-    }
-    return Promise.all(accepted.map(b => b.callback(message, trace, info)));
+    return _channel.consume(_queueName, _msgHandler(_channel, _queueName, _bindings), {noAck: _noAck});
   };
 }
 
-module.exports = MicroMessageHub;
+export {MicroMessageHub};
