@@ -2,11 +2,11 @@
   "name": "micro-message-hub",
   "version": "0.1.0",
   "description": "Opinionated messaging for your microservices with RabbitMQ using amqplib.",
-  "main": "lib/index.js",
+  "main": "lib/micro-message-hub.js",
   "scripts": {
-    "build": "rm -rf lib && babel -d lib src",
-    "prepublish": "npm run build",
-    "test": "mocha"
+    "compile": "rm -rf lib && babel -d lib src",
+    "prepublish": "npm run compile",
+    "test": "mocha --compilers js:babel-core/register"
   },
   "keywords": [
     "AMQP",
@@ -25,7 +25,8 @@
     "uuid": "^2.0.1"
   },
   "devDependencies": {
-    "babel-cli": "^6.6.5",
+    "babel-cli": "^6.7.5",
+    "babel-core": "^6.7.6",
     "babel-preset-es2015-node": "^4.0.1",
     "mocha": "^2.4.5"
   }

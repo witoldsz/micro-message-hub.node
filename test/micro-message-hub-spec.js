@@ -1,33 +1,27 @@
-'use strict';
+import assert from 'assert'
+import amqp from 'amqplib'
 
-const assert = require('assert');
-const amqp = require('amqplib');
+import {MicroMessageHub} from '../src/micro-message-hub'
 
 describe('micro message hub', () => {
 
-  before(() => {
+  const hub1 = new MicroMessageHub({moduleName: 'test-1'});
+  const hub2 = new MicroMessageHub({moduleName: 'test-2'});
 
+  before(() => Promise.all([hub1.connect(), hub2.connect()]));
+
+  it('should...', (done) => {
+    hub1.eventQueue()
+      .bind('command.sayHi', (event, trace) => {
+        assert.equal(event.name, 'Hub2');
+        done();
+      });
+    Promise
+      .all([hub1.ready(), hub2.ready()])
+      .then(() => hub2.publish('command.sayHi', {name: 'Hub2'}))
+      .catch(done);
   });
 
-  it('should verify the infrastructure', (done) => {
-    Object.keys(process.env).sort().forEach(k => console.log(k + ': ' + process.env[k]));
-    Promise.resolve()
-      .then(() => amqp.connect())
-      .then(conn => conn.createChannel())
-      .then(chan => {
-        chan.assertQueue('tasks');
-        return chan.sendToQueue('tasks', new Buffer('something to do'));
-      })
-      .then(() => amqp.connect())
-      .then(conn => conn.createChannel())
-      .then(chan => {
-        chan.assertQueue('tasks');
-        chan.consume('tasks', msg => {
-          assert.equal(msg.content.toString(), 'something to do');
-          chan.ack(msg);
-          done();
-        });
-      })
-  });
+
 
 });
