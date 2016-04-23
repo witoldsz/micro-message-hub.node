@@ -4,6 +4,7 @@ import uuid  from 'uuid';
 const EVENT_EXCHANGE = 'amq.topic';
 const QUERY_EXCHANGE = 'amq.topic';
 const DIRECT_REPLY_QUEUE = 'amq.rabbitmq.reply-to';
+const DEFAULT_QUERY_TIMEOUT = 3000;
 
 function MicroMessageHub({
     moduleName, url, socketOptions, conn,
@@ -14,78 +15,178 @@ function MicroMessageHub({
   }) {
 
   const queues = [];
-  let   publishChannel;
-
-  this._responsesChannel = null;
+  const queryResponseListeners = new Map();
+  let eventPublishChannel, queryChannel;
 
   this.connect = () => {
-    return (conn ? Promise.resolve(conn) : amqp.connect(url, socketOptions))
-      .then(c => {
-        conn = c;
+    return Promise.resolve(conn || amqp.connect(url, socketOptions))
+      .then(conn_ => {
+        conn = conn_;
         return Promise.all([conn.createConfirmChannel(), conn.createChannel()])
       })
-      .then(([confirmChannel, simpleChannel]) => {
-        publishChannel = confirmChannel;
-        this._responsesChannel = simpleChannel;
+      .then(([confirmChannel, nonConfirmChannel]) => {
+        eventPublishChannel = confirmChannel;
+        queryChannel = nonConfirmChannel;
+        return queryChannel.assertQueue(moduleName, {exclusive: true});
+      })
+      .then(() => {
+        const queryResponseHandler = msg => {
+          const correlationId = msg.properties.correlationId;
+          const resolve = queryResponseListeners.get(correlationId);
+          if (resolve) {
+            queryResponseListeners.delete(correlationId);
+            resolve(parserOf(msg)(msg));
+          }
+        };
+        return queryChannel.consume(DIRECT_REPLY_QUEUE, queryResponseHandler, {noAck: true});
       })
       ;
   };
 
   this.ready = () => {
-    return Promise.all(queues.map(q => q._ready()));
+    return Promise
+      .all(queues.map(q => q._ready()))
+      .then(() => {
+        const pingResponseHandler = msg => {
+          queryChannel.sendToQueue(msg.properties.replyTo, new Buffer(moduleName), {contentType: 'text/plain'});
+        };
+        return queryChannel.consume(moduleName, pingResponseHandler, {noAck: true});
+      });
   };
 
   this.eventQueue = (name = 'events', {prefetchCount = 1} = {}) => {
-    const q = new EventQueue({
-      conn,
+    const q = new Queue({
       queueName: moduleName + ':' + name,
       exchangeName: eventExchangeName,
-      prefetchCount
+      prefetchCount,
+      queueOptions: {
+        exclusive: false,
+        durable: true,
+        autoDelete: false
+      },
+      msgOptions: {
+        noAck: false,
+        onAck: (channel, msg) => channel.ack(msg),
+        onNack: (channel, msg) => channel.nack(msg)
+      }
     });
     queues.push(q);
     return q;
   };
 
   this.queryQueue = (name = 'queries', {prefetchCount = 0} = {}) => {
-    const q = new QueryQueue({
-      conn,
+    const q = new Queue({
       queueName: moduleName + ':' + name,
       exchangeName: queryExchangeName,
       prefetchCount,
-      responsesChannel: this._responsesChannel
+      queueOptions: {
+        exclusive: false,
+        durable: false,
+        autoDelete: true
+      },
+      msgOptions: {
+        noAck: true,
+        onAck: (channel, msg, results) => {
+          try {
+            const p = msg.properties;
+            const options = publishOptions(p.headers.trace, {
+              persistent: false,
+              correlationId: p.correlationId
+            });
+            results.forEach(r => channel.sendToQueue(p.replyTo, bufferOf(r, options), options));
+          } catch (err) {
+            console.error(err);
+          }
+        },
+        onNack: () => {}
+      }
     });
     queues.push(q);
     return q;
   };
 
   this.publish = (routingKey, body = {}, trace = [], options = {}) => {
-    options = publishOptions(trace, options, {isQuery: routingKey.startsWith('query.')});
-    return new Promise((resolve, reject) => {
-      const cb = (isErr) => isErr ? reject(new Error('Message nacked!')) : resolve(/*TODO: tracePoint*/);
-      publishChannel.publish(eventExchangeName, routingKey, bufferOf(body, options), options, cb);
-    });
+    const isQuery = routingKey.startsWith('query.');
+    options = publishOptions(trace, options, {isQuery});
+    const newTrace = options.headers.trace;
+    const newTracePoint = newTrace[newTrace.length - 1];
+    const buffer = bufferOf(body, options);
+    return isQuery
+      ? publishQueryPromise(routingKey, buffer, newTrace, newTracePoint, options)
+      : publishEventPromise(routingKey, buffer, newTrace, newTracePoint, options);
   };
 
-  this.___publish = (routingKey, body = {}, trace = [], options = {}) => {
-    return new Promise((reject, resolve) => {
-      const newTracePoint = uuid.v4();
-      const headers = Object.assign({
-        trace: trace.concat(newTracePoint),
-        ts: new Date().toJSON()
-      }, options.headers);
+  const publishQueryPromise = (routingKey, buffer, trace, tracePoint, options) => new Promise((resolve, reject) => {
+    const correlationId = options.correlationId;
+    const rejectBackup = () => queryResponseListeners.delete(correlationId) && reject(new Error('Timeout'));
+    queryResponseListeners.set(correlationId, resolve);
+    setTimeout(rejectBackup, DEFAULT_QUERY_TIMEOUT);
+    queryChannel.publish(queryExchangeName, routingKey, buffer, options);
+  });
 
-      options = Object.assign({
-          contentType: 'application/json',
-          deliveryMode: DELIVERY_MODE_PERSISTENT
-        }, options, {headers}
-      );
-      const serializer = this._serializers[options.contentType] || this._serializers['default'];
-      const buffer = serializer(body);
-      const cb = (err) => err ? reject('Message nacked!') : resolve(newTracePoint);
-      publishChannel.publish(eventExchangeName, routingKey, buffer, options, cb)
-    });
-  };
+  const publishEventPromise = (routingKey, buffer, trace, tracePoint, options) => new Promise((resolve, reject) => {
+    const cb = (isErr) => isErr ? reject(new Error('Message NACKed!')) : resolve(tracePoint);
+    eventPublishChannel.publish(eventExchangeName, routingKey, buffer, options, cb);
+  });
 
+  function Queue({queueName, exchangeName, prefetchCount, queueOptions, msgOptions}) {
+    let channel;
+    const bindings = [];
+
+    this.bind = (routingKey, callback) => {
+      console.log(`Binding queue [${queueName}] to <${routingKey}>`);
+      bindings.push({
+        routingKey,
+        callback,
+        routingKeyPattern: new RegExp(routingKey.replace('.', '[.]').replace('[.]#', '([.].*)?'))});
+      return this;
+    };
+
+    this._ready = () => {
+      return conn.createChannel()
+        .then(channel_ => {
+          channel = channel_;
+          channel.prefetch(prefetchCount);
+          return channel.assertQueue(queueName, queueOptions)
+        })
+        .then(() => Promise.all(bindings.map(b => channel.bindQueue(queueName, exchangeName, b.routingKey))))
+        .then(() => channel.consume(queueName, msgHandler, {noAck: msgOptions.noAck}))
+    };
+
+    const msgHandler = (msg) => {
+      const routingKey = msg.fields.routingKey;
+      const accepted = bindings.filter(b => b.routingKeyPattern.test(routingKey));
+
+      if (accepted.length < 1) {
+        console.log(`No listener for <${routingKey}> on queue [${queueName}]`);
+      }
+
+      const parser = parserOf(msg);
+      const trace = msg.properties.headers.trace || [];
+
+      Promise.resolve()
+        .then(() => Promise.all(accepted.map(b => b.callback(parser(msg), trace, msg))))
+        .then(results => msgOptions.onAck(channel, msg, results), () => msgOptions.onNack(channel, msg))
+        .catch(err => console.error(err));
+    }
+  }
+
+  const publishOptions = (trace, options, {isQuery = false} = {}) => {
+    const newTracePoint = uuid.v4();
+    const headers = Object.assign({
+      trace: trace.concat(newTracePoint),
+      ts: new Date().toJSON(),
+      publisher: moduleName
+    }, options.headers);
+
+    return Object.assign({
+        replyTo: isQuery ? DIRECT_REPLY_QUEUE : undefined,
+        correlationId: isQuery ? newTracePoint : undefined,
+        contentType: 'application/json',
+        persistent: true
+      }, options, {headers}
+    );
+  }
 }
 
 function bufferOf(body, options) {
@@ -98,113 +199,13 @@ function bufferOf(body, options) {
   return serializer(body);
 }
 
-function publishOptions(trace, options, {isQuery = false}) {
-  const newTracePoint = uuid.v4();
-  const headers = Object.assign({
-    correlationId: isQuery ? newTracePoint : undefined,
-    replyTo: isQuery ? DIRECT_REPLY_QUEUE : undefined,
-    trace: trace.concat(newTracePoint),
-    ts: new Date().toJSON()
-  }, options.headers);
-
-  return Object.assign({
-      contentType: 'application/json',
-      persistent: true
-    }, options, {headers}
-  );
-}
-
-class AbstractQueue {
-  constructor({conn, queueName, exchangeName, prefetchCount, noAck, queueOptions}) {
-    this._conn = conn;
-    this._queueName = queueName;
-    this._exchangeName = exchangeName;
-    this._prefetchCount = prefetchCount;
-    this._noAck = noAck;
-    this._queueOptions = queueOptions;
-    this._bindings = [];
-    this._parsers = {
-      'application/json': (msg) => JSON.parse(msg.content.toString()),
-      'text/plain': (msg) => msg.content.toString(),
-      'default': (msg) => msg.content
-    };
-  }
-
-  bind(routingKey, callback) {
-    console.log(`binding queue [${this._queueName}] to <${routingKey}>`);
-    const patternStr = routingKey.replace('.', '[.]').replace('[.]#', '([.].*)?');
-    const routingKeyPattern = new RegExp(patternStr);
-    this._bindings.push({callback, routingKey, routingKeyPattern});
-    return this;
-  }
-
-  _ready() {
-    return this._createChannel()
-      .then(channel => {
-        this._channel = channel;
-        this._channel.prefetch(this._prefetchCount);
-        return this._channel.assertQueue(this._queueName, this._queueOptions);
-      })
-      .then(() => Promise.all(this._bindings.map(b =>
-        this._channel.bindQueue(this._queueName, this._exchangeName, b.routingKey))))
-      .then(() => this._channel.consume(this._queueName, (msg) => this._msgHandler(msg), {noAck: this._noAck}));
-  }
-
-  _msgHandler(msg) {
-    const routingKey = msg.fields.routingKey;
-    const accepted = this._bindings.filter(b => b.routingKeyPattern.test(routingKey));
-
-    if (accepted.length < 1) {
-      console.log(`MMH: No listener for <${routingKey}> on queue [${this._queueName}]`);
-    }
-
-    const parser = this._parsers[msg.properties.contentType] || this._parsers['default'];
-    const trace = msg.properties.headers.trace || [];
-
-    return Promise
-      .all(accepted.map(b => b.callback(parser(msg), trace, msg)))
-      .then(results => this._ack(msg, results), () => this._nack(msg));
-  }
-}
-
-class EventQueue extends AbstractQueue {
-  constructor(args) {
-    super(Object.assign({
-      _noAck: false,
-      queueOptions: {
-        exclusive: false,
-        durable: true,
-        autoDelete: false
-      }}, args));
-  }
-  _createChannel() {return this._conn.createConfirmChannel()}
-  _ack(msg, results) {return this._channel.ack(msg)}
-  _nack(msg) {return this._channel.nack(msg)}
-}
-
-class QueryQueue extends AbstractQueue {
-  constructor({args}) {
-    super(Object.assign({
-      noAck: true,
-      queueOptions: {
-        exclusive: true,
-        durable: false,
-        autoDelete: true
-      }}, args));
-    this._responsesChannel = args.responsesChannel;
-  }
-  _createChannel() {return this._conn.createChannel()}
-  _ack(msg, results) {
-    const options = publishOptions(msg.properties.headers.trace, {
-      persistent: false,
-      correlationId: msg.properties.correlationId
-    });
-    results.forEach(result => {
-      this._responsesChannel.sendToQueue(msg.properties.replyTo, options)
-    });
-    return Promise.resolve();
-  }
-  _nack(msg) {return Promise.resolve()}
+function parserOf(msg) {
+  const parsers = {
+    'application/json': (msg) => JSON.parse(msg.content.toString()),
+    'text/plain': (msg) => msg.content.toString(),
+    'default': (msg) => msg.content
+  };
+  return parsers[msg.properties.contentType] || parsers['default'];
 }
 
 export {MicroMessageHub};
