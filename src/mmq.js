@@ -1,16 +1,22 @@
 import amqp from 'amqplib';
 import uuid  from 'uuid';
 
-const EVENT_EXCHANGE = 'amq.topic';
-const QUERY_EXCHANGE = 'amq.topic';
-const DIRECT_REPLY_QUEUE = 'amq.rabbitmq.reply-to';
+const DEFAULT_URL = '';
+const DEFAULT_EVENT_EXCHANGE = 'amq.topic';
+const DEFAULT_QUERY_EXCHANGE = 'amq.topic';
 const DEFAULT_QUERY_TIMEOUT = 3000;
 
-function MicroMessageHub({
-    moduleName, url, socketOptions, conn,
+const DEFAULT_CONTENT_TYPE = 'application/json';
+const SYMBOL_CONTENT_TYPE = Symbol.for('content-type');
+
+const DIRECT_REPLY_QUEUE = 'amq.rabbitmq.reply-to';
+
+function MicroMessageQueues({
+    moduleName, url = DEFAULT_URL, socketOptions, conn,
     options: {
-      eventExchangeName = EVENT_EXCHANGE,
-      queryExchangeName = QUERY_EXCHANGE
+      eventExchangeName = DEFAULT_EVENT_EXCHANGE,
+      queryExchangeName = DEFAULT_QUERY_EXCHANGE,
+      queryTimeout = DEFAULT_QUERY_TIMEOUT
     } = {}
   }) {
 
@@ -18,8 +24,13 @@ function MicroMessageHub({
   const queryResponseListeners = new Map();
   let eventPublishChannel, queryChannel;
 
+  this.close = () => {
+    return conn.close();
+  };
+
   this.connect = () => {
-    return Promise.resolve(conn || amqp.connect(url, socketOptions))
+    return Promise.resolve()
+      .then(() => conn || amqp.connect(url, socketOptions))
       .then(conn_ => {
         conn = conn_;
         return Promise.all([conn.createConfirmChannel(), conn.createChannel()])
@@ -35,7 +46,13 @@ function MicroMessageHub({
           const resolve = queryResponseListeners.get(correlationId);
           if (resolve) {
             queryResponseListeners.delete(correlationId);
-            resolve(parserOf(msg)(msg));
+            resolve({
+              msg,
+              correlationId,
+              contentType: msg.properties.contentType,
+              trace: msg.properties.headers.trace,
+              body: parserOf(msg)(msg)
+            });
           }
         };
         return queryChannel.consume(DIRECT_REPLY_QUEUE, queryResponseHandler, {noAck: true});
@@ -48,7 +65,10 @@ function MicroMessageHub({
       .all(queues.map(q => q._ready()))
       .then(() => {
         const pingResponseHandler = msg => {
-          queryChannel.sendToQueue(msg.properties.replyTo, new Buffer(moduleName), {contentType: 'text/plain'});
+          queryChannel.sendToQueue(msg.properties.replyTo, new Buffer(moduleName), {
+            persistent: false,
+            contentType: 'text/plain'
+          });
         };
         return queryChannel.consume(moduleName, pingResponseHandler, {noAck: true});
       });
@@ -89,13 +109,16 @@ function MicroMessageHub({
         onAck: (channel, msg, results) => {
           try {
             const p = msg.properties;
-            const options = publishOptions(p.headers.trace, {
-              persistent: false,
-              correlationId: p.correlationId
+            results.forEach(payload => {
+              const options = publishOptions(p.headers.trace, payload, {
+                persistent: false,
+                correlationId: p.correlationId,
+                contentType: payload[SYMBOL_CONTENT_TYPE] || DEFAULT_CONTENT_TYPE
+              });
+              channel.sendToQueue(p.replyTo, bufferOf(payload), options)
             });
-            results.forEach(r => channel.sendToQueue(p.replyTo, bufferOf(r, options), options));
           } catch (err) {
-            console.error(err);
+            console.error(err.stack || err);
           }
         },
         onNack: () => {}
@@ -105,12 +128,12 @@ function MicroMessageHub({
     return q;
   };
 
-  this.publish = (routingKey, body = {}, trace = [], options = {}) => {
+  this.publish = (routingKey, payload, trace = [], options = {}) => {
     const isQuery = routingKey.startsWith('query.');
-    options = publishOptions(trace, options, {isQuery});
+    options = publishOptions(trace, payload, options, {isQuery});
     const newTrace = options.headers.trace;
     const newTracePoint = newTrace[newTrace.length - 1];
-    const buffer = bufferOf(body, options);
+    const buffer = bufferOf(payload);
     return isQuery
       ? publishQueryPromise(routingKey, buffer, newTrace, newTracePoint, options)
       : publishEventPromise(routingKey, buffer, newTrace, newTracePoint, options);
@@ -118,9 +141,11 @@ function MicroMessageHub({
 
   const publishQueryPromise = (routingKey, buffer, trace, tracePoint, options) => new Promise((resolve, reject) => {
     const correlationId = options.correlationId;
-    const rejectBackup = () => queryResponseListeners.delete(correlationId) && reject(new Error('Timeout'));
+    const rejectBackup = () => {
+      queryResponseListeners.delete(correlationId) && reject(new Error(`Timeout on <${routingKey}>`));
+    };
     queryResponseListeners.set(correlationId, resolve);
-    setTimeout(rejectBackup, DEFAULT_QUERY_TIMEOUT);
+    setTimeout(rejectBackup, queryTimeout);
     queryChannel.publish(queryExchangeName, routingKey, buffer, options);
   });
 
@@ -154,24 +179,32 @@ function MicroMessageHub({
     };
 
     const msgHandler = (msg) => {
-      const routingKey = msg.fields.routingKey;
-      const accepted = bindings.filter(b => b.routingKeyPattern.test(routingKey));
-
-      if (accepted.length < 1) {
-        console.log(`No listener for <${routingKey}> on queue [${queueName}]`);
+      if (msg === null) {
+        return console.warn(`Consumer of queue [${queueName}] has been canceled`);
       }
-
-      const parser = parserOf(msg);
-      const trace = msg.properties.headers.trace || [];
-
       Promise.resolve()
-        .then(() => Promise.all(accepted.map(b => b.callback(parser(msg), trace, msg))))
-        .then(results => msgOptions.onAck(channel, msg, results), () => msgOptions.onNack(channel, msg))
-        .catch(err => console.error(err));
+        .then(() => {
+
+          const routingKey = msg.fields.routingKey;
+          const accepted = bindings.filter(b => b.routingKeyPattern.test(routingKey));
+
+          if (accepted.length < 1) {
+            console.log(`No listener for <${routingKey}> on queue [${queueName}]`);
+          }
+
+          const parser = parserOf(msg);
+          const trace = msg.properties.headers.trace || [];
+
+          return Promise.all(accepted.map(b => b.callback(parser(msg), trace, msg)))
+        })
+        .then(
+          results => msgOptions.onAck(channel, msg, results),
+          err => {console.error(err.stack || err); msgOptions.onNack(channel, msg)})
+        ;
     }
   }
 
-  const publishOptions = (trace, options, {isQuery = false} = {}) => {
+  const publishOptions = (trace, payload, options, {isQuery = false} = {}) => {
     const newTracePoint = uuid.v4();
     const headers = Object.assign({
       trace: trace.concat(newTracePoint),
@@ -182,20 +215,22 @@ function MicroMessageHub({
     return Object.assign({
         replyTo: isQuery ? DIRECT_REPLY_QUEUE : undefined,
         correlationId: isQuery ? newTracePoint : undefined,
-        contentType: 'application/json',
-        persistent: true
+        persistent: !isQuery,
+        contentType: payload[SYMBOL_CONTENT_TYPE] || DEFAULT_CONTENT_TYPE
       }, options, {headers}
     );
   }
 }
 
-function bufferOf(body, options) {
+function bufferOf(payload) {
   const serializers = {
     'application/json': (body) => new Buffer(JSON.stringify(body)),
     'text/plain': (body) => new Buffer(body),
     'default': (body) => body
   };
-  const serializer = serializers[options.contentType] || serializers['default'];
+  const contentType = payload[SYMBOL_CONTENT_TYPE] || DEFAULT_CONTENT_TYPE;
+  const body = payload[SYMBOL_CONTENT_TYPE] ? payload.body : payload;
+  const serializer = serializers[contentType] || serializers['default'];
   return serializer(body);
 }
 
@@ -208,4 +243,4 @@ function parserOf(msg) {
   return parsers[msg.properties.contentType] || parsers['default'];
 }
 
-export {MicroMessageHub};
+export {MicroMessageQueues};
