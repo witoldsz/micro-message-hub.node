@@ -1,17 +1,16 @@
 import amqp from 'amqplib';
 import uuid  from 'uuid';
+import {Queue} from './queue';
+import {DEFAULT_CONTENT_TYPE, SYMBOL_CONTENT_TYPE, bufferOf, parserOf} from './content_types'
 
 const DEFAULT_URL = '';
 const DEFAULT_EVENT_EXCHANGE = 'amq.topic';
 const DEFAULT_QUERY_EXCHANGE = 'amq.topic';
 const DEFAULT_QUERY_TIMEOUT = 3000;
 
-const DEFAULT_CONTENT_TYPE = 'application/json';
-const SYMBOL_CONTENT_TYPE = Symbol.for('content-type');
-
 const DIRECT_REPLY_QUEUE = 'amq.rabbitmq.reply-to';
 
-function MicroMessageQueues({
+export function MicroMessageQueues({
     moduleName, url = DEFAULT_URL, socketOptions, conn,
     options: {
       eventExchangeName = DEFAULT_EVENT_EXCHANGE,
@@ -76,6 +75,7 @@ function MicroMessageQueues({
 
   this.eventQueue = (name = 'events', {prefetchCount = 1} = {}) => {
     const q = new Queue({
+      conn,
       queueName: moduleName + ':' + name,
       exchangeName: eventExchangeName,
       prefetchCount,
@@ -96,6 +96,7 @@ function MicroMessageQueues({
 
   this.queryQueue = (name = 'queries', {prefetchCount = 0} = {}) => {
     const q = new Queue({
+      conn,
       queueName: moduleName + ':' + name,
       exchangeName: queryExchangeName,
       prefetchCount,
@@ -154,56 +155,6 @@ function MicroMessageQueues({
     eventPublishChannel.publish(eventExchangeName, routingKey, buffer, options, cb);
   });
 
-  function Queue({queueName, exchangeName, prefetchCount, queueOptions, msgOptions}) {
-    let channel;
-    const bindings = [];
-
-    this.bind = (routingKey, callback) => {
-      console.log(`Binding queue [${queueName}] to <${routingKey}>`);
-      bindings.push({
-        routingKey,
-        callback,
-        routingKeyPattern: new RegExp(routingKey.replace('.', '[.]').replace('[.]#', '([.].*)?'))});
-      return this;
-    };
-
-    this._ready = () => {
-      return conn.createChannel()
-        .then(channel_ => {
-          channel = channel_;
-          channel.prefetch(prefetchCount);
-          return channel.assertQueue(queueName, queueOptions)
-        })
-        .then(() => Promise.all(bindings.map(b => channel.bindQueue(queueName, exchangeName, b.routingKey))))
-        .then(() => channel.consume(queueName, msgHandler, {noAck: msgOptions.noAck}))
-    };
-
-    const msgHandler = (msg) => {
-      if (msg === null) {
-        return console.warn(`Consumer of queue [${queueName}] has been canceled`);
-      }
-      Promise.resolve()
-        .then(() => {
-
-          const routingKey = msg.fields.routingKey;
-          const accepted = bindings.filter(b => b.routingKeyPattern.test(routingKey));
-
-          if (accepted.length < 1) {
-            console.log(`No listener for <${routingKey}> on queue [${queueName}]`);
-          }
-
-          const parser = parserOf(msg);
-          const trace = msg.properties.headers.trace || [];
-
-          return Promise.all(accepted.map(b => b.callback(parser(msg), trace, msg)))
-        })
-        .then(
-          results => msgOptions.onAck(channel, msg, results),
-          err => {console.error(err.stack || err); msgOptions.onNack(channel, msg)})
-        ;
-    }
-  }
-
   const publishOptions = (trace, payload, options, {isQuery = false} = {}) => {
     const newTracePoint = uuid.v4();
     const headers = Object.assign({
@@ -221,26 +172,3 @@ function MicroMessageQueues({
     );
   }
 }
-
-function bufferOf(payload) {
-  const serializers = {
-    'application/json': (body) => new Buffer(JSON.stringify(body)),
-    'text/plain': (body) => new Buffer(body),
-    'default': (body) => body
-  };
-  const contentType = payload[SYMBOL_CONTENT_TYPE] || DEFAULT_CONTENT_TYPE;
-  const body = payload[SYMBOL_CONTENT_TYPE] ? payload.body : payload;
-  const serializer = serializers[contentType] || serializers['default'];
-  return serializer(body);
-}
-
-function parserOf(msg) {
-  const parsers = {
-    'application/json': (msg) => JSON.parse(msg.content.toString()),
-    'text/plain': (msg) => msg.content.toString(),
-    'default': (msg) => msg.content
-  };
-  return parsers[msg.properties.contentType] || parsers['default'];
-}
-
-export {MicroMessageQueues};
