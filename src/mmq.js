@@ -1,7 +1,8 @@
 import amqp from 'amqplib';
 import uuid  from 'uuid';
 import {Queue} from './queue';
-import {DEFAULT_CONTENT_TYPE, SYMBOL_CONTENT_TYPE, bufferOf, parserOf} from './content_types'
+import {DEFAULT_CONTENT_TYPE, SYMBOL_CONTENT_TYPE, bufferOf, parse} from './content_types'
+import {consoleLogger as DEFAULT_LOGGER} from './loggers'
 
 const DEFAULT_URL = '';
 const DEFAULT_EVENT_EXCHANGE = 'amq.topic';
@@ -13,6 +14,7 @@ const DIRECT_REPLY_QUEUE = 'amq.rabbitmq.reply-to';
 export function MicroMessageQueues({
     moduleName, url = DEFAULT_URL, socketOptions, conn,
     options: {
+      log = DEFAULT_LOGGER,
       eventExchangeName = DEFAULT_EVENT_EXCHANGE,
       queryExchangeName = DEFAULT_QUERY_EXCHANGE,
       queryTimeout = DEFAULT_QUERY_TIMEOUT
@@ -50,7 +52,7 @@ export function MicroMessageQueues({
               correlationId,
               contentType: msg.properties.contentType,
               trace: msg.properties.headers.trace,
-              body: parserOf(msg)(msg)
+              body: parse(msg)
             });
           }
         };
@@ -75,6 +77,7 @@ export function MicroMessageQueues({
 
   this.eventQueue = (name = 'events', {prefetchCount = 1} = {}) => {
     const q = new Queue({
+      log,
       conn,
       queueName: moduleName + ':' + name,
       exchangeName: eventExchangeName,
@@ -96,6 +99,7 @@ export function MicroMessageQueues({
 
   this.queryQueue = (name = 'queries', {prefetchCount = 0} = {}) => {
     const q = new Queue({
+      log,
       conn,
       queueName: moduleName + ':' + name,
       exchangeName: queryExchangeName,
@@ -119,7 +123,7 @@ export function MicroMessageQueues({
               channel.sendToQueue(p.replyTo, bufferOf(payload), options)
             });
           } catch (err) {
-            console.error(err.stack || err);
+            log.error(err);
           }
         },
         onNack: () => {}

@@ -1,5 +1,6 @@
 import assert from 'assert'
 import amqp from 'amqplib'
+import {noopLogger as log} from '../src/loggers';
 
 import {MicroMessageQueues} from '../src/mmq'
 
@@ -27,8 +28,8 @@ describe('micro message hub', () => {
         amqpChannel.deleteQueue('mmq2:queries')
       ])
       .then(() => {
-        mmq1 = new MicroMessageQueues({moduleName: 'mmq1'});
-        mmq2 = new MicroMessageQueues({moduleName: 'mmq2'});
+        mmq1 = new MicroMessageQueues({moduleName: 'mmq1', options: {log}});
+        mmq2 = new MicroMessageQueues({moduleName: 'mmq2', options: {log}});
         return Promise.all([mmq1.connect(), mmq2.connect()])
       })
   });

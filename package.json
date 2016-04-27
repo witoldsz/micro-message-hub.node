@@ -2,7 +2,7 @@
   "name": "micro-message-hub",
   "version": "0.1.0",
   "description": "Opinionated messaging for your microservices with RabbitMQ using amqplib.",
-  "main": "lib/micro-message-hub.js",
+  "main": "lib/index.js",
   "scripts": {
     "compile": "rm -rf lib && babel -d lib src",
     "prepublish": "npm run compile",

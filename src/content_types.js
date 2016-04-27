@@ -13,11 +13,11 @@ export function bufferOf(payload) {
   return serializer(body);
 }
 
-export function parserOf(msg) {
-  const parsers = {
-    'application/json': (msg) => JSON.parse(msg.content.toString()),
-    'text/plain': (msg) => msg.content.toString(),
-    'default': (msg) => msg.content
-  };
-  return parsers[msg.properties.contentType] || parsers['default'];
+export function parse(msg) {
+  const buffer = msg.content;
+  switch (msg.properties.contentType) {
+    case 'application/json': return JSON.parse(buffer.toString());
+    case 'text/plain': return buffer.toString();
+    default: return buffer;
+  }
 }

@@ -1,11 +1,11 @@
-import {parserOf} from './content_types'
+import {parse} from './content_types'
 
-export function Queue({conn, queueName, exchangeName, prefetchCount, queueOptions, msgOptions}) {
+export function Queue({log, conn, queueName, exchangeName, prefetchCount, queueOptions, msgOptions}) {
   let channel;
   const bindings = [];
 
   this.bind = (routingKey, callback) => {
-    console.log(`Binding queue [${queueName}] to <${routingKey}>`);
+    log.info({queueName, routingKey}, 'binding queue');
     bindings.push({
       routingKey,
       callback,
@@ -26,26 +26,27 @@ export function Queue({conn, queueName, exchangeName, prefetchCount, queueOption
 
   const msgHandler = (msg) => {
     if (msg === null) {
-      return console.warn(`Consumer of queue [${queueName}] has been canceled`);
+      return log.warn({queueName}, `Consumer has been canceled`);
     }
     Promise.resolve()
       .then(() => {
-
         const routingKey = msg.fields.routingKey;
+        const redelivered = msg.fields.redelivered;
         const accepted = bindings.filter(b => b.routingKeyPattern.test(routingKey));
+        const trace = msg.properties.headers.trace || [];
+        const tracePoint = trace[trace.length - 1];
+        const load = parse(msg);
+
+        log.info({queueName, routingKey, trace, tracePoint, redelivered, load}, 'incoming');
 
         if (accepted.length < 1) {
-          console.log(`No listener for <${routingKey}> on queue [${queueName}]`);
+          log.warn({queueName, routingKey}, 'No listener');
         }
-
-        const parser = parserOf(msg);
-        const trace = msg.properties.headers.trace || [];
-
-        return Promise.all(accepted.map(b => b.callback(parser(msg), trace, msg)))
+        return Promise.all(accepted.map(b => b.callback(load, trace, msg)));
       })
       .then(
         results => msgOptions.onAck(channel, msg, results),
-        err => {console.error(err.stack || err); msgOptions.onNack(channel, msg)})
-    ;
+        err => {log.error(err); msgOptions.onNack(channel, msg)}
+      );
   }
 }
