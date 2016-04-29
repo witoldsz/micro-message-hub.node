@@ -1,7 +1,6 @@
 import assert from 'assert'
 import amqp from 'amqplib'
-import {noopLogger as log} from '../src/loggers';
-
+import {NoopLogger} from '../src/loggers'
 import {MicroMessageQueues} from '../src/mmq'
 
 const TS_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
@@ -20,6 +19,7 @@ describe('micro message hub', () => {
       .then((chan) => {amqpChannel = chan;});
   });
 
+
   beforeEach(() => {
     return Promise.all([
         amqpChannel.deleteQueue('mmq1:events'),
@@ -28,8 +28,8 @@ describe('micro message hub', () => {
         amqpChannel.deleteQueue('mmq2:queries')
       ])
       .then(() => {
-        mmq1 = new MicroMessageQueues({moduleName: 'mmq1', options: {log}});
-        mmq2 = new MicroMessageQueues({moduleName: 'mmq2', options: {log}});
+        mmq1 = new MicroMessageQueues({moduleName: 'mmq1', options: {log: new NoopLogger()}});
+        mmq2 = new MicroMessageQueues({moduleName: 'mmq2', options: {log: new NoopLogger()}});
         return Promise.all([mmq1.connect(), mmq2.connect()])
       })
   });

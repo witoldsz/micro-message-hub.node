@@ -5,7 +5,7 @@ export function Queue({log, conn, queueName, exchangeName, prefetchCount, queueO
   const bindings = [];
 
   this.bind = (routingKey, callback) => {
-    log.info({queueName, routingKey}, 'binding queue');
+    log.emit('binding', {queueName, routingKey});
     bindings.push({
       routingKey,
       callback,
@@ -26,27 +26,28 @@ export function Queue({log, conn, queueName, exchangeName, prefetchCount, queueO
 
   const msgHandler = (msg) => {
     if (msg === null) {
-      return log.warn({queueName}, `Consumer has been canceled`);
+      return log.emit('warn', {queueName}, `Consumer has been canceled`);
     }
     Promise.resolve()
       .then(() => {
         const routingKey = msg.fields.routingKey;
-        const redelivered = msg.fields.redelivered;
+        const deliveryTag = msg.fields.deliveryTag;
         const accepted = bindings.filter(b => b.routingKeyPattern.test(routingKey));
         const trace = msg.properties.headers.trace || [];
-        const tracePoint = trace[trace.length - 1];
         const load = parse(msg);
 
-        log.info({queueName, routingKey, trace, tracePoint, redelivered, load}, 'incoming');
+        log.emit('incoming',
+          Object.assign({queueName, routingKey, load}, deliveryTag > 1 ? {deliveryTag} : null),
+          trace);
 
         if (accepted.length < 1) {
-          log.warn({queueName, routingKey}, 'No listener');
+          log.emit('warn', {queueName, routingKey}, 'No listener');
         }
         return Promise.all(accepted.map(b => b.callback(load, trace, msg)));
       })
       .then(
         results => msgOptions.onAck(channel, msg, results),
-        err => {log.error(err); msgOptions.onNack(channel, msg)}
+        err => {log.emit('error', err); msgOptions.onNack(channel, msg);}
       );
   }
 }

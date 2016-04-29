@@ -1,2 +1,2 @@
 export {MicroMessageQueues} from './mmq'
-export {consoleLogger, noopLogger, bunyanAdapter} from './loggers'
+export {ConsoleLogger, NoopLogger, BunyanAdapter} from './loggers'

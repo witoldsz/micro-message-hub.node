@@ -2,7 +2,7 @@ import amqp from 'amqplib';
 import uuid  from 'uuid';
 import {Queue} from './queue';
 import {DEFAULT_CONTENT_TYPE, SYMBOL_CONTENT_TYPE, bufferOf, parse} from './content_types'
-import {consoleLogger as DEFAULT_LOGGER} from './loggers'
+import {ConsoleLogger} from './loggers'
 
 const DEFAULT_URL = '';
 const DEFAULT_EVENT_EXCHANGE = 'amq.topic';
@@ -14,7 +14,7 @@ const DIRECT_REPLY_QUEUE = 'amq.rabbitmq.reply-to';
 export function MicroMessageQueues({
     moduleName, url = DEFAULT_URL, socketOptions, conn,
     options: {
-      log = DEFAULT_LOGGER,
+      log = new ConsoleLogger(),
       eventExchangeName = DEFAULT_EVENT_EXCHANGE,
       queryExchangeName = DEFAULT_QUERY_EXCHANGE,
       queryTimeout = DEFAULT_QUERY_TIMEOUT
@@ -123,7 +123,7 @@ export function MicroMessageQueues({
               channel.sendToQueue(p.replyTo, bufferOf(payload), options)
             });
           } catch (err) {
-            log.error(err);
+            log.emit('error', err);
           }
         },
         onNack: () => {}
@@ -133,18 +133,22 @@ export function MicroMessageQueues({
     return q;
   };
 
-  this.publish = (routingKey, payload, trace = [], options = {}) => {
+  this.publish = (routingKey, load, trace = [], options = {}) => {
     const isQuery = routingKey.startsWith('query.');
-    options = publishOptions(trace, payload, options, {isQuery});
+    options = publishOptions(trace, load, options, {isQuery});
     const newTrace = options.headers.trace;
     const newTracePoint = newTrace[newTrace.length - 1];
-    const buffer = bufferOf(payload);
+    const buffer = bufferOf(load);
+
+    log.emit('publishing', {routingKey, load}, newTrace);
+
     return isQuery
       ? publishQueryPromise(routingKey, buffer, newTrace, newTracePoint, options)
       : publishEventPromise(routingKey, buffer, newTrace, newTracePoint, options);
   };
 
   const publishQueryPromise = (routingKey, buffer, trace, tracePoint, options) => new Promise((resolve, reject) => {
+
     const correlationId = options.correlationId;
     const rejectBackup = () => {
       queryResponseListeners.delete(correlationId) && reject(new Error(`Timeout on <${routingKey}>`));
@@ -159,7 +163,7 @@ export function MicroMessageQueues({
     eventPublishChannel.publish(eventExchangeName, routingKey, buffer, options, cb);
   });
 
-  const publishOptions = (trace, payload, options, {isQuery = false} = {}) => {
+  const publishOptions = (trace, load, options, {isQuery = false} = {}) => {
     const newTracePoint = uuid.v4();
     const headers = Object.assign({
       trace: trace.concat(newTracePoint),
@@ -171,7 +175,7 @@ export function MicroMessageQueues({
         replyTo: isQuery ? DIRECT_REPLY_QUEUE : undefined,
         correlationId: isQuery ? newTracePoint : undefined,
         persistent: !isQuery,
-        contentType: payload[SYMBOL_CONTENT_TYPE] || DEFAULT_CONTENT_TYPE
+        contentType: load[SYMBOL_CONTENT_TYPE] || DEFAULT_CONTENT_TYPE
       }, options, {headers}
     );
   }

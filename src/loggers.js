@@ -1,37 +1,35 @@
-export const noopLogger = {
-  name: 'noop',
-  error: (err) => {
-    console.error(err.stack || err);
-  },
-  warn: (context, message) => {},
-  info: (context, message) => {}
-};
+import EventEmitter from 'events';
 
-export const consoleLogger = {
-  name: 'console',
-  error: (err) => {
-    console.error(err.stack || err);
-  },
-  warn: (context, message) => {
-    console.warn(message + ' %j', context);
-  },
-  info: (context, message) => {
-    console.info(message + ' %j', context);
+export class NoopLogger extends EventEmitter {}
+
+export class ConsoleLogger extends EventEmitter {
+  constructor() {
+    super();
+    this.on('incoming', (context, trace) => console.info('incoming %j', context));
+    this.on('publishing', (context, trace) => console.info('publishing %j', context));
+    this.on('binding', (context) => console.info('binding %j', context));
+    this.on('error', (err) => console.error(err.stack || err));
+    this.on('warn', (context, message) => console.warn(message + ' %j', context));
   }
-};
+}
 
-export const bunyanAdapter = (bunyanLog, {
-  levels: {error = 'error', warn = 'warn', info = 'info'} = {}
-}) => ({
+export class BunyanAdapter extends EventEmitter {
+  constructor(bunyanLog, levels = {
+    incoming: 'trace', publishing: 'trace', binding: 'trace', error: 'error', warn: 'warn'
+  }) {
+    super();
+    this.bunyanLog = bunyanLog;
+    this.levels = levels;
 
-  name: 'bunyan',
-  error: (err) => {
-    bunyanLog[error](err);
-  },
-  warn: (context, message) => {
-    bunyanLog[warn](context, message)
-  },
-  info: (context, message) => {
-    bunyanLog[info](context, message)
+    this.on('incoming', (context, trace) => this._log('incoming', Object.assign({trace}, context), 'incoming'));
+    this.on('publishing', (context, trace) => this._log('publishing', Object.assign({trace}, context), 'publishing'));
+    this.on('binding', (context) => this._log('binding', context, 'binding'));
+    this.on('error', (err) => this._log('error', {err}));
+    this.on('warn', (context, message) => this._log('warn', context, message));
   }
-});
+
+  _log(action, context, message) {
+    const level = this.levels[action];
+    if (level) this.bunyanLog[level](context, message);
+  }
+}
