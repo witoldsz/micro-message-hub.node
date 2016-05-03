@@ -30,7 +30,9 @@ export function FakeMicroMessageQueues({moduleName}) {
         fakeResponses.push({routingKey, loadOrPredicate, responseOrResponseFn});
       }}
         :
-      {/* TODO... */}
+      {thenExecute: (callback) => {
+        return Promise.resolve().then(() => callback(routingKey, loadOrPredicate));
+      }}
     }
   };
 
@@ -72,7 +74,7 @@ export function FakeMicroMessageQueues({moduleName}) {
           if (matchingByRoutingKey.length < 1) throw new Error(
             `There is no response for ${routingKey}`);
           if (matchingResponses.length < 1) throw new Error(
-            `There are responses for ${routingKey} but neither matches load/predicate`);
+            `There are responses for ${routingKey} but neither matches the ${JSON.stringify(load)}`);
           if (matchingResponses.length > 1) throw new Error(
             `There is more than one matching response for ${routingKey}`);
 

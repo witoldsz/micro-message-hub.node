@@ -91,6 +91,31 @@ describe('fake micro message queues', () => {
           assert.deepEqual(result, {queryBodyWas: {BID_EUR_PLN: true}});
         });
     });
+
+    it('should throw Error when nothing to return', () => {
+      mmq.when.published('query.exchangeRate', {BID_EUR_PLN: true}).willReturn({BID_EUR_PLN: '4.3832'});
+      return Promise.resolve()
+        .then(() => mmq.publish('query.somethingElse', {}, []))
+        .then(
+          () => assert.fail('no error', 'an error', 'should throw for query.somethingElse'),
+          err => assert.equal(err.message, 'There is no response for query.somethingElse'))
+
+        .then(() => mmq.publish('query.exchangeRate', {ASK_EUR_PLN: true}, []))
+        .then(
+          () => assert.fail('no error', 'an error', 'should throw for query.exchangeRate'),
+          err => assert.equal(err.message,
+            'There are responses for query.exchangeRate but neither matches the {"ASK_EUR_PLN":true}'))
+    });
   });
 
+  describe('recording event feedback: when.published(event...).thenExecute(...)', () => {
+    it('should execute callback with parameters provided when recording', () => {
+      return mmq
+        .when.published('command.sayHi', {I_AM: 'Sam'})
+        .thenExecute((routingKey, event) => {
+          assert.equal(routingKey, 'command.sayHi');
+          assert.deepEqual(event, {I_AM: 'Sam'});
+        })
+    });
+  });
 });
