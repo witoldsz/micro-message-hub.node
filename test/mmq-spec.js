@@ -8,7 +8,7 @@ const TS_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 const DELIVERY_MODE_PERSISTENT = 2;
 const DELIVERY_MODE_NON_PERSISTENT = 1;
 
-describe('micro message hub', () => {
+describe('micro message queues with real AMQP server', () => {
 
   let mmq1, mmq2;
   let amqpConnection, amqpChannel;
@@ -18,7 +18,6 @@ describe('micro message hub', () => {
       .then(conn => {amqpConnection = conn; return conn.createChannel();})
       .then((chan) => {amqpChannel = chan;});
   });
-
 
   beforeEach(() => {
     return Promise.all([
@@ -39,26 +38,28 @@ describe('micro message hub', () => {
 
   describe('basics', () => {
     it('should create event queue and receive published event', (done) => {
-      mmq1.eventQueue()
-        .bind('command.sayHi', (event, trace, msg) => {
-          try {
-            assert.equal(event.name, 'Stefan', 'name');
+      const command_sayHi = (event, trace, msg) => {
+        try {
+          assert.equal(event.name, 'Stefan', 'name');
 
-            assert.equal(msg.properties.deliveryMode, DELIVERY_MODE_PERSISTENT, 'delivery mode');
-            const headers = msg.properties.headers;
-            assert(headers, 'headers');
-            const ts = headers.ts;
-            assert(ts, 'ts header');
-            assert(TS_PATTERN.test(ts), `ts header ${ts} format`);
-            assert(Array.isArray(headers.trace), 'trace header is array');
-            assert.deepEqual(headers.trace, trace, 'trace header equal to trace argument');
-            assert.equal(headers.publisher, 'mmq2', 'publisher name');
-            assert.equal(msg.properties.contentType, 'application/json', 'content type');
-            done();
-          } catch (err) {
-            done(err);
-          }
-        });
+          assert.equal(msg.fields.routingKey, 'command.sayHi');
+          assert.equal(msg.properties.deliveryMode, DELIVERY_MODE_PERSISTENT, 'delivery mode');
+          const headers = msg.properties.headers;
+          assert(headers, 'headers');
+          const ts = headers.ts;
+          assert(ts, 'ts header');
+          assert(TS_PATTERN.test(ts), `ts header ${ts} format`);
+          assert(Array.isArray(headers.trace), 'trace header is array');
+          assert.deepEqual(headers.trace, trace, 'trace header equal to trace argument');
+          assert.equal(headers.publisher, 'mmq2', 'publisher name');
+          assert.equal(msg.properties.contentType, 'application/json', 'content type');
+          done();
+        } catch (err) {
+          done(err);
+        }
+      };
+
+      mmq1.eventQueue().bind('command.sayHi', command_sayHi);
       Promise
         .all([mmq1.ready(), mmq2.ready()])
         .then(() => mmq2.publish('command.sayHi', {name: 'Stefan'}))
@@ -66,24 +67,25 @@ describe('micro message hub', () => {
     });
 
     it('should create query queue and answer the question', (done) => {
-      mmq1.queryQueue()
-        .bind('query.plusOne', (event, trace, msg) => {
-          try {
-            assert.equal(msg.properties.deliveryMode, DELIVERY_MODE_NON_PERSISTENT, 'query handler: delivery mode');
-            const headers = msg.properties.headers;
-            assert(headers, 'query handler: headers');
-            const ts = headers.ts;
-            assert(ts, 'query handler: ts header');
-            assert(TS_PATTERN.test(ts), `query handler: ts header ${ts} format`);
-            assert(Array.isArray(headers.trace), 'query handler: trace header is array');
-            assert.deepEqual(headers.trace, trace, 'query handler: trace header equal to trace argument');
-            assert.equal(headers.publisher, 'mmq2', 'query handler: publisher name');
-            assert.equal(msg.properties.contentType, 'application/json', 'query handler: content type');
-          } catch (err) {
-            done(err);
-          }
-          return {number: event.number + 1};
-        });
+      const query_plusOne = (event, trace, msg) => {
+        try {
+          assert.equal(msg.properties.deliveryMode, DELIVERY_MODE_NON_PERSISTENT, 'query handler: delivery mode');
+          const headers = msg.properties.headers;
+          assert(headers, 'query handler: headers');
+          const ts = headers.ts;
+          assert(ts, 'query handler: ts header');
+          assert(TS_PATTERN.test(ts), `query handler: ts header ${ts} format`);
+          assert(Array.isArray(headers.trace), 'query handler: trace header is array');
+          assert.deepEqual(headers.trace, trace, 'query handler: trace header equal to trace argument');
+          assert.equal(headers.publisher, 'mmq2', 'query handler: publisher name');
+          assert.equal(msg.properties.contentType, 'application/json', 'query handler: content type');
+        } catch (err) {
+          done(err);
+        }
+        return {number: event.number + 1};
+      };
+
+      mmq1.queryQueue().bind('query.plusOne', query_plusOne);
       Promise
         .all([mmq1.ready(), mmq2.ready()])
         .then(() => mmq2.publish('query.plusOne', {number: 12}))
@@ -107,6 +109,5 @@ describe('micro message hub', () => {
         })
         .catch(done);
     });
-
   });
 });
