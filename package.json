@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "description": "Opinionated messaging for your microservices with RabbitMQ using amqplib.",
   "main": "lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/witoldsz/micro-message-hub.node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/witoldsz/micro-message-hub.node/issues"
+  },
   "scripts": {
     "compile": "rm -rf lib && babel -d lib src",
     "prepublish": "npm run compile",
