@@ -2,6 +2,8 @@ import {parse} from './content_types'
 import {QueueBindings} from './queue-bindings'
 
 export function Queue({log, conn, queueName, exchangeName, prefetchCount, queueOptions, msgOptions}) {
+
+  let channel;
   const queueBindings = new QueueBindings();
 
   this.bind = (routingKey, callback) => {
@@ -10,18 +12,23 @@ export function Queue({log, conn, queueName, exchangeName, prefetchCount, queueO
     return this;
   };
 
+  this._close = () => {
+    return channel ? channel.close() : Promise.resolve();
+  };
+
   this._ready = () => {
     return conn
       .createChannel()
-      .then(channel => {
+      .then(channel_ => {
+        channel = channel_;
         channel.prefetch(prefetchCount);
-        return channel
-          .assertQueue(queueName, queueOptions)
-          .then(() => Promise.all(
-            queueBindings.routingKeys.map(routingKey => channel.bindQueue(queueName, exchangeName, routingKey))
-          ))
-          .then(() => channel.consume(queueName, msgHandler(channel), {noAck: msgOptions.noAck}))
+        return channel.assertQueue(queueName, queueOptions)
       })
+      .then(() => Promise.all(
+        queueBindings.routingKeys.map(routingKey => channel.bindQueue(queueName, exchangeName, routingKey))
+      ))
+      .then(() => channel.consume(queueName, msgHandler(channel), {noAck: msgOptions.noAck}))
+
   };
 
   const msgHandler = (channel) => (msg) => {

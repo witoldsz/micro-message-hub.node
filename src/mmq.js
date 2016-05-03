@@ -21,12 +21,25 @@ export function MicroMessageQueues({
     } = {}
   }) {
 
+  const amqpConnWasProvided = !!conn;
   const queues = [];
   const queryResponseListeners = new Map();
   let eventPublishChannel, queryChannel;
 
-  this.close = () => {
-    return conn.close();
+  /**
+   * Closes the connection if it was established here or the parameter "force" is true. It is untouched otherwise.
+   * All the channels are closed always.
+   * Once closed, the MicroMessageQueues cannot be used again, it has to be recreated from scratch.
+   * @param force when true, the AMPQ connection will be closed even if it was not opened here.
+   * @returns {Promise}
+   * */
+  this.close = ({force = false} = {}) => {
+    return Promise
+      .all(queues.map(q => q._close()))
+      .then(() => eventPublishChannel && eventPublishChannel.close())
+      .then(() => queryChannel && queryChannel.close())
+      .then(() => conn && (!amqpConnWasProvided || force) && conn.close())
+    ;
   };
 
   this.connect = () => {
